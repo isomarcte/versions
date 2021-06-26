@@ -3,6 +3,7 @@ package coursier.version
 import dataclass.data
 import coursier.version.internal.Compatibility._
 
+import scala.annotation.nowarn
 import scala.annotation.tailrec
 
 /**
@@ -12,8 +13,11 @@ import scala.annotation.tailrec
  */
 @data class Version(repr: String) extends Ordered[Version] {
   lazy val items: Vector[Version.Item] = Version.items(repr)
-  def compare(other: Version) = Version.listCompare(items, other.items)
+  def compare(other: Version) = repr.compareTo(other.repr)
   def isEmpty = items.forall(_.isEmpty)
+
+  def compareByScheme(versionCompatibility: VersionCompatibility, relaxed: Boolean = true)(other: Version): Either[String, Int] =
+    Version.versionSchemeCompare(repr, other.repr, versionCompatibility, relaxed)
 }
 
 object Version {
@@ -207,8 +211,63 @@ object Version {
     first +: tokens.toVector.map(_._2)
   }
 
+  @nowarn("cat=deprecation")
+  def versionSchemeCompare(first0: String, second0: String, versionCompatibility: VersionCompatibility, relaxed: Boolean = true): Either[String, Int] = {
+    import VersionCompatibility._
+    versionCompatibility match {
+      case Default | PackVer | Strict =>
+        Right(first0.compareTo(second0))
+      case Always =>
+        Right(0)
+      case EarlySemVer | SemVerSpec | SemVer =>
+        def asItems(value: String): Vector[Item] = {
+          val items0: Vector[Item] = items(value).filterNot(isBuildMetadata)
+          val size: Int = items0.size
+          if (relaxed && size < 3) {
+            items0 ++ Vector.fill(3 - size)(empty)
+          } else {
+            items0
+          }
+        }
+
+        val first: Vector[Item] =
+          asItems(first0)
+        val second: Vector[Item] =
+          asItems(second0)
+
+        if (first.size == 3 && second.size == 3) {
+          Right(first.zip(second).foldLeft(0){
+            case (0, (first, second)) =>
+              first.compareTo(second)
+            case (otherwise, _) =>
+              // We've determined the result, so we can and should skip the
+              // remaining comparisons.
+              otherwise
+          })
+        } else {
+          def makeError(name: String, stringValue: String, size: Int): String =
+            s"$name version ($stringValue) has invalid size for Semver/EarlySemver. According to the specification it MUST have exactly 3 components (not including metadata), but we found $size components."
+          val firstError: List[String] =
+            if (first.size != 3) {
+              List(makeError("First", first0, first.size))
+            } else {
+              Nil
+            }
+          val secondError: List[String] =
+            if (second.size != 3) {
+              List(makeError("Second", second0, second.size))
+            } else {
+              Nil
+            }
+
+          Left((firstError ++ secondError).mkString(", "))
+        }
+    }
+  }
+
   // before comparing two versions pad the number parts to the equal number of digits
   // for example, 1-ga, and 1.0.0 comparison will be adjusted first to 1.0.0-ga and 1.0.0.
+  @deprecated(message = "Version values can only be compared for scheme equality if a VersionCompatibility value is provided. Please use versionSchemeCompare instead.", since = "0.3.2")
   def listCompare(first0: Vector[Item], second0: Vector[Item]): Int = {
     // Semver § 10: two versions that differ only in the build metadata, have the same precedence.
     val first = first0.filterNot(isBuildMetadata)
@@ -231,6 +290,7 @@ object Version {
   }
 
   @tailrec
+  @deprecated(message = "Version values can only be compared for scheme equality if a VersionCompatibility value is provided. Please use versionSchemeCompare instead.", since = "0.3.2")
   private def listCompare0(first: Vector[Item], second: Vector[Item]): Int = {
     if (first.isEmpty && second.isEmpty) 0
     else if (first.isEmpty) {
